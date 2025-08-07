@@ -45,7 +45,7 @@ void setup() {
   WiFi.begin(ssid, password);
   display.fillScreen(GxEPD_WHITE);
   display.setCursor(0, 20);
-  display.print("Connecting WiFi...");
+  display.print("Connecting to WiFi...");
   display.display(true);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -72,18 +72,7 @@ void setup() {
 
 void loop() {
   // Show loading animation
-  for (int dots = 1; dots <= 3; ++dots) {
-    display.fillScreen(GxEPD_WHITE);
-    display.setCursor(0, 20);
-    display.print("Refreshing");
-    for (int d = 0; d < dots; ++d) display.print(".");
-    // Draw current time in top right
-    String currentTime = getCurrentTimeString();
-    display.setCursor(160, 0); // Adjust X for your display width
-    display.print(currentTime);
-    display.display(true);
-    delay(200);
-  }
+  
 
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClient client;
@@ -126,24 +115,87 @@ void loop() {
         snprintf(localTime, sizeof(localTime), "%02d:%02d %s", hour, minute, ampm.c_str());
         depTime = String(localTime);
 
-        display.fillScreen(GxEPD_WHITE);
-        // Draw black bar at the top (adjust height as needed, e.g., 0,0 to 212,20 for 212px wide, 20px tall)
-        display.fillRect(0, 0, display.width(), 20, GxEPD_BLACK);
+        // Extract origin and destination info
+        JsonObject origin = train["legs"][0]["origin"];
+        JsonObject destination = train["legs"][0]["destination"];
 
-        // Set text color to white for the time
+        // Extract names and times
+        String originName = origin["name"].as<String>(); // e.g. "Penrith Station, Platform 3, Sydney"
+        String originTimeRaw = origin["departureTimePlanned"].as<String>(); // e.g. "2025-08-07T09:26:00Z"
+        String destName = destination["name"].as<String>(); // e.g. "Central Station, Platform 16, Sydney"
+        String destTimeRaw = destination["arrivalTimePlanned"].as<String>(); // e.g. "2025-08-07T11:39:00Z"
+
+        // Helper to extract platform from name (assumes "Platform X" is always present)
+        auto extractPlatform = [](const String& name) -> String {
+          int idx = name.indexOf("Platform ");
+          if (idx >= 0) {
+            int end = name.indexOf(",", idx);
+            if (end < 0) end = name.length();
+            return name.substring(idx, end);
+          }
+          return "";
+        };
+
+        // Helper to extract station title (before first comma)
+        auto extractStation = [](const String& name) -> String {
+          int idx = name.indexOf(",");
+          if (idx >= 0) return name.substring(0, idx);
+          return name;
+        };
+
+        // Helper to format time as 12-hour with AM/PM
+        auto formatTime = [](const String& isoTime) -> String {
+          int hour = isoTime.substring(11, 13).toInt();
+          int minute = isoTime.substring(14, 16).toInt();
+          // Adjust for AEST (+10 hours)
+          hour += 10;
+          if (hour >= 24) hour -= 24;
+          String ampm = "AM";
+          if (hour == 0) { hour = 12; }
+          else if (hour == 12) { ampm = "PM"; }
+          else if (hour > 12) { hour -= 12; ampm = "PM"; }
+          char buf[10];
+          snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
+          return String(buf);
+        };
+
+        String originStation = extractStation(originName);
+        String originPlatform = extractPlatform(originName);
+        String originTime = formatTime(originTimeRaw);
+
+        String destStation = extractStation(destName);
+        String destPlatform = extractPlatform(destName);
+        String destTime = formatTime(destTimeRaw);
+
+        // Draw split header bar
+        display.fillScreen(GxEPD_WHITE);
+        display.fillRect(0, 0, display.width(), 15, GxEPD_BLACK);
         display.setTextColor(GxEPD_WHITE);
-        display.setCursor(160, 5); // Adjust X and Y as needed
-        display.print(getCurrentTimeString());
-        
+        display.setCursor(10, 5);
+        display.print(originStation);
+        display.setCursor(display.width() / 2 + 10, 5);
+        display.print(destStation);
+
+        // Draw vertical split line
+        display.drawLine(display.width() / 2, 0, display.width() / 2, display.height(), GxEPD_BLACK);
+
+        // Set text color back to black for info
         display.setTextColor(GxEPD_BLACK);
-        display.setCursor(0, 20);
-        display.print("Next Train:");
-        display.setCursor(0, 40);
-        display.print("To: ");
-        display.print(dest);
-        display.setCursor(0, 60);
+
+        // Left side: origin info
+        display.setCursor(10, 30);
+        display.print(originPlatform);
+        display.setCursor(10, 50);
         display.print("Dep: ");
-        display.print(depTime);
+        display.print(originTime);
+
+        // Right side: destination info
+        display.setCursor(display.width() / 2 + 10, 30);
+        display.print(destPlatform);
+        display.setCursor(display.width() / 2 + 10, 50);
+        display.print("Arr: ");
+        display.print(destTime);
+
         display.display(true);
       } else {
         displayError("JSON Error: " + String(error.c_str()));
