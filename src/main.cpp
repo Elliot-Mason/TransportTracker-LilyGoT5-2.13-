@@ -36,6 +36,14 @@ String getCurrentTimeString() {
   return String(buf);
 }
 
+// Map route type to label
+String getRouteLabel(const String& routeType) {
+  if (routeType == "BMT") return "Intercity";
+  if (routeType == "T1") return "T1";
+  // Add more as needed
+  return routeType;
+}
+
 void setup() {
   Serial.begin(115200);
   display.init();
@@ -125,6 +133,10 @@ void loop() {
         String destName = destination["name"].as<String>(); // e.g. "Central Station, Platform 16, Sydney"
         String destTimeRaw = destination["arrivalTimePlanned"].as<String>(); // e.g. "2025-08-07T11:39:00Z"
 
+        // Extract route type
+        String routeType = train["legs"][0]["transportation"]["disassembledName"].as<String>();
+        String routeLabel = getRouteLabel(routeType);
+
         // Helper to extract platform from name (assumes "Platform X" is always present)
         auto extractPlatform = [](const String& name) -> String {
           int idx = name.indexOf("Platform ");
@@ -195,6 +207,10 @@ void loop() {
         display.setCursor(display.width() / 2 + 10, 50);
         display.print("Arr: ");
         display.print(destTime);
+
+        // Bottom left: route label
+        display.setCursor(10, display.height() - 20);
+        display.print(routeLabel);
 
         display.display(true);
       } else {
