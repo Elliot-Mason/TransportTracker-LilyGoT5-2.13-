@@ -79,9 +79,6 @@ void setup() {
 }
 
 void loop() {
-  // Show loading animation
-  
-
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClient client;
     HTTPClient http;
@@ -96,42 +93,16 @@ void loop() {
 
       if (!error) {
         JsonObject train = doc[0].as<JsonObject>();
-        String depTime = train["legs"][0]["origin"]["departureTimePlanned"].as<String>();
-        String dest = train["legs"][0]["destination"]["name"].as<String>();
-        String rawTime = train["legs"][0]["origin"]["departureTimePlanned"].as<String>();
-        int hour = rawTime.substring(11, 13).toInt();
-        int minute = rawTime.substring(14, 16).toInt();
-
-        // Adjust for AEST (+10 hours)
-        hour += 10;
-        if (hour >= 24) hour -= 24; // wrap around if next day
-
-        // Convert to 12-hour format
-        String ampm = "AM";
-        if (hour == 0) {
-          hour = 12;
-          ampm = "AM";
-        } else if (hour == 12) {
-          ampm = "PM";
-        } else if (hour > 12) {
-          hour -= 12;
-          ampm = "PM";
-        }
-
-        // Format with leading zeroes
-        char localTime[9];
-        snprintf(localTime, sizeof(localTime), "%02d:%02d %s", hour, minute, ampm.c_str());
-        depTime = String(localTime);
 
         // Extract origin and destination info
         JsonObject origin = train["legs"][0]["origin"];
         JsonObject destination = train["legs"][0]["destination"];
 
         // Extract names and times
-        String originName = origin["name"].as<String>(); // e.g. "Penrith Station, Platform 3, Sydney"
-        String originTimeRaw = origin["departureTimePlanned"].as<String>(); // e.g. "2025-08-07T09:26:00Z"
-        String destName = destination["name"].as<String>(); // e.g. "Central Station, Platform 16, Sydney"
-        String destTimeRaw = destination["arrivalTimePlanned"].as<String>(); // e.g. "2025-08-07T11:39:00Z"
+        String originName = origin["name"].as<String>();
+        String originTimeRaw = origin["departureTimePlanned"].as<String>();
+        String destName = destination["name"].as<String>();
+        String destTimeRaw = destination["arrivalTimePlanned"].as<String>();
 
         // Extract route type
         String routeType = train["legs"][0]["transportation"]["disassembledName"].as<String>();
@@ -213,13 +184,24 @@ void loop() {
         display.print(routeLabel);
 
         display.display(true);
+        delay(30000); // Only delay after a successful update
       } else {
         displayError("JSON Error: " + String(error.c_str()));
         Serial.print("JSON parse error: ");
         Serial.println(error.c_str());
+        delay(30000);
       }
+    } else if (httpCode == -1) {
+      // Connection failed, show message and retry instantly
+      String errMsg = "HTTP Connection failed Retrying now";
+      Serial.print(errMsg);
+      Serial.print(": ");
+      Serial.println(http.errorToString(httpCode));
+      displayError(errMsg);
+      delay(1000); // Short delay before retrying
+      return;      // Instantly retry on next loop
     } else {
-      // Handle error responses
+      // Handle other error responses
       String errorResponse = http.getString();
       Serial.print("HTTP Error: ");
       Serial.print(httpCode);
@@ -239,14 +221,15 @@ void loop() {
       } else {
         displayError("HTTP Error " + String(httpCode));
       }
+      delay(30000);
     }
     http.end();
   } else {
     displayError("WiFi Lost!");
     Serial.println("WiFi disconnected");
     WiFi.begin(ssid, password);
+    delay(30000);
   }
-  delay(30000); // 30 seconds
 }
 
 void displayError(const String &message) {
