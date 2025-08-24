@@ -1,5 +1,5 @@
 #include <WiFi.h>
-#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
@@ -11,6 +11,8 @@ GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 const char* api_url = API_URL;
+unsigned long lastRefresh = 0;
+const unsigned long refreshInterval = 5 * 60 * 1000; // 5 minutes
 
 void displayError(const String &message);
 
@@ -40,7 +42,6 @@ String getCurrentTimeString() {
 String getRouteLabel(const String& routeType) {
   if (routeType == "BMT") return "Intercity";
   if (routeType == "T1") return "T1";
-  // Add more as needed
   return routeType;
 }
 
@@ -66,7 +67,6 @@ void setup() {
   display.display(true);
   delay(1000);
 
-  // Set up NTP time (AEST, UTC+10)
   configTime(10 * 3600, 0, "au.pool.ntp.org", "time.nist.gov");
   Serial.print("Waiting for NTP time sync...");
   time_t now = time(nullptr);
@@ -78,169 +78,199 @@ void setup() {
   Serial.println(" done!");
 }
 
+// Force full inversion refresh to reduce ghosting
+void fullRefresh() {
+  for (int i = 0; i < 2; i++) { // cycle twice
+    display.fillScreen(GxEPD_BLACK);
+    display.display(false);  // full refresh
+    delay(500);
+    display.fillScreen(GxEPD_WHITE);
+    display.display(false);  // full refresh
+    delay(500);
+  }
+}
+
 void loop() {
   if (WiFi.status() == WL_CONNECTED) {
-    WiFiClient client;
+    WiFiClientSecure client;
+    client.setInsecure(); // accept any SSL cert
     HTTPClient http;
 
-    http.begin(client, api_url);
-    int httpCode = http.GET();
+    String currentUrl = api_url;
+    bool requestDone = false;
 
-    if (httpCode == HTTP_CODE_OK) {
-      String payload = http.getString();
-      JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, payload);
+    while (!requestDone) {
+      http.begin(client, currentUrl);
+      int httpCode = http.GET();
 
-      if (!error) {
-        JsonObject train = doc[0].as<JsonObject>();
+      if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        StaticJsonDocument<8192> doc;
+        DeserializationError error = deserializeJson(doc, payload);
 
-        // Extract origin and destination info
-        JsonObject origin = train["legs"][0]["origin"];
-        JsonObject destination = train["legs"][0]["destination"];
+        if (!error) {
+          // Find the next train departing after current time
+          JsonObject nextTrain;
+          time_t nowTime = time(nullptr);
 
-        // Extract names and times
-        String originName = origin["name"].as<String>();
-        String originTimeRaw = origin["departureTimePlanned"].as<String>();
-        String destName = destination["name"].as<String>();
-        String destTimeRaw = destination["arrivalTimePlanned"].as<String>();
+          for (JsonObject train : doc.as<JsonArray>()) {
+            String depTimeStr = train["legs"][0]["origin"]["departureTimePlanned"].as<String>();
+            struct tm depTimeInfo = {};
+            strptime(depTimeStr.c_str(), "%Y-%m-%dT%H:%M:%S", &depTimeInfo);
+            time_t depTime = mktime(&depTimeInfo);
+            depTime -= 10 * 3600; // adjust for AEST (UTC+10)
 
-        // Extract route type
-        String routeType = train["legs"][0]["transportation"]["disassembledName"].as<String>();
-        String routeLabel = getRouteLabel(routeType);
-
-        // Helper to extract platform from name (assumes "Platform X" is always present)
-        auto extractPlatform = [](const String& name) -> String {
-          int idx = name.indexOf("Platform ");
-          if (idx >= 0) {
-            int end = name.indexOf(",", idx);
-            if (end < 0) end = name.length();
-            return name.substring(idx, end);
+            if (depTime >= nowTime) {
+              nextTrain = train;
+              break;
+            }
           }
-          return "";
-        };
 
-        // Helper to extract station title (before first comma)
-        auto extractStation = [](const String& name) -> String {
-          int idx = name.indexOf(",");
-          if (idx >= 0) return name.substring(0, idx);
-          return name;
-        };
+          if (nextTrain.isNull()) nextTrain = doc[0].as<JsonObject>();
 
-        // Helper to format time as 12-hour with AM/PM
-        auto formatTime = [](const String& isoTime) -> String {
-          int hour = isoTime.substring(11, 13).toInt();
-          int minute = isoTime.substring(14, 16).toInt();
-          // Adjust for AEST (+10 hours)
-          hour += 10;
-          if (hour >= 24) hour -= 24;
-          String ampm = "AM";
-          if (hour == 0) { hour = 12; }
-          else if (hour == 12) { ampm = "PM"; }
-          else if (hour > 12) { hour -= 12; ampm = "PM"; }
-          char buf[10];
-          snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
-          return String(buf);
-        };
+          JsonObject origin = nextTrain["legs"][0]["origin"];
+          JsonObject destination = nextTrain["legs"][0]["destination"];
 
-        String originStation = extractStation(originName);
-        String originPlatform = extractPlatform(originName);
-        String originTime = formatTime(originTimeRaw);
+          String originName = origin["name"].as<String>();
+          String originTimeRaw = origin["departureTimePlanned"].as<String>();
+          String destName = destination["name"].as<String>();
+          String destTimeRaw = destination["arrivalTimePlanned"].as<String>();
 
-        String destStation = extractStation(destName);
-        String destPlatform = extractPlatform(destName);
-        String destTime = formatTime(destTimeRaw);
+          String routeType = nextTrain["legs"][0]["transportation"]["disassembledName"].as<String>();
+          String routeLabel = getRouteLabel(routeType);
 
-        // Draw split header bar
-        display.fillScreen(GxEPD_WHITE);
-        display.fillRect(0, 0, display.width(), 15, GxEPD_BLACK);
-        display.setTextColor(GxEPD_WHITE);
-        display.setCursor(10, 5);
-        display.print(originStation);
-        display.setCursor(display.width() / 2 + 10, 5);
-        display.print(destStation);
+          auto extractPlatform = [](const String& name) -> String {
+            int idx = name.indexOf("Platform ");
+            if (idx >= 0) {
+              int end = name.indexOf(",", idx);
+              if (end < 0) end = name.length();
+              return name.substring(idx, end);
+            }
+            return "";
+          };
 
-        // Draw vertical split line
-        display.drawLine(display.width() / 2, 0, display.width() / 2, display.height(), GxEPD_BLACK);
+          auto extractStation = [](const String& name) -> String {
+            int idx = name.indexOf(",");
+            if (idx >= 0) return name.substring(0, idx);
+            return name;
+          };
 
-        // Set text color back to black for info
-        display.setTextColor(GxEPD_BLACK);
+          auto formatTime = [](const String& isoTime) -> String {
+            int hour = isoTime.substring(11, 13).toInt();
+            int minute = isoTime.substring(14, 16).toInt();
+            hour += 10;
+            if (hour >= 24) hour -= 24;
+            String ampm = "AM";
+            if (hour == 0) hour = 12;
+            else if (hour == 12) ampm = "PM";
+            else if (hour > 12) { hour -= 12; ampm = "PM"; }
+            char buf[10];
+            snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
+            return String(buf);
+          };
 
-        // Left side: origin info
-        display.setCursor(10, 30);
-        display.print(originPlatform);
-        display.setCursor(10, 50);
-        display.print("Dep: ");
-        display.print(originTime);
+          String originStation = extractStation(originName);
+          String originPlatform = extractPlatform(originName);
+          String originTime = formatTime(originTimeRaw);
 
-        // Right side: destination info
-        display.setCursor(display.width() / 2 + 10, 30);
-        display.print(destPlatform);
-        display.setCursor(display.width() / 2 + 10, 50);
-        display.print("Arr: ");
-        display.print(destTime);
+          String destStation = extractStation(destName);
+          String destPlatform = extractPlatform(destName);
+          String destTime = formatTime(destTimeRaw);
 
-        // Bottom left: route label
-        display.setCursor(10, display.height() - 20);
-        display.print(routeLabel);
+          display.fillScreen(GxEPD_WHITE);
+          display.fillRect(0, 0, display.width(), 15, GxEPD_BLACK);
+          display.setTextColor(GxEPD_WHITE);
+          display.setCursor(10, 5);
+          display.print(originStation);
+          display.setCursor(display.width() / 2 + 10, 5);
+          display.print(destStation);
 
-        display.display(true);
-        delay(30000); // Only delay after a successful update
-      } else {
-        displayError("JSON Error: " + String(error.c_str()));
-        Serial.print("JSON parse error: ");
-        Serial.println(error.c_str());
-        delay(30000);
-      }
-    } else if (httpCode == -1) {
-      // Connection failed, show message and retry instantly
-      String errMsg = "HTTP Connection failed Retrying now";
-      Serial.print(errMsg);
-      Serial.print(": ");
-      Serial.println(http.errorToString(httpCode));
-      displayError(errMsg);
-      delay(1000); // Short delay before retrying
-      return;      // Instantly retry on next loop
-    } else {
-      // Handle other error responses
-      String errorResponse = http.getString();
-      Serial.print("HTTP Error: ");
-      Serial.print(httpCode);
-      Serial.print(" - Response: ");
-      Serial.println(errorResponse);
+          display.drawLine(display.width() / 2, 0, display.width() / 2, display.height(), GxEPD_BLACK);
 
-      // Try to parse the error message
-      JsonDocument errorDoc;
-      DeserializationError jsonError = deserializeJson(errorDoc, errorResponse);
+          display.setTextColor(GxEPD_BLACK);
+          display.setCursor(10, 30);
+          display.print(originPlatform);
+          display.setCursor(10, 50);
+          display.print("Dep: ");
+          display.print(originTime);
 
-      if (!jsonError && errorDoc.containsKey("error")) {
-        String errorMessage = errorDoc["error"].as<String>();
-        if (errorDoc.containsKey("details")) {
-          errorMessage += ": " + errorDoc["details"].as<String>();
+          display.setCursor(display.width() / 2 + 10, 30);
+          display.print(destPlatform);
+          display.setCursor(display.width() / 2 + 10, 50);
+          display.print("Arr: ");
+          display.print(destTime);
+
+          display.setCursor(10, display.height() - 20);
+          display.print(routeLabel);
+
+          display.display(true);
+          delay(30000);
+        } else {
+          displayError("JSON Error: " + String(error.c_str()));
+          Serial.print("JSON parse error: ");
+          Serial.println(error.c_str());
+          delay(30000);
         }
-        displayError(errorMessage);
+        requestDone = true;
+      } else if (httpCode == 308) {
+        String newLocation = http.getLocation();
+        http.end();
+        currentUrl = newLocation; // follow redirect
+      } else if (httpCode == -1) {
+        String errMsg = "HTTP Connection failed Retrying now";
+        Serial.print(errMsg);
+        Serial.print(": ");
+        Serial.println(http.errorToString(httpCode));
+        displayError(errMsg);
+        delay(1000);
       } else {
-        displayError("HTTP Error " + String(httpCode));
+        String errorResponse = http.getString();
+        Serial.print("HTTP Error: ");
+        Serial.print(httpCode);
+        Serial.print(" - Response: ");
+        Serial.println(errorResponse);
+
+        StaticJsonDocument<1024> errorDoc;
+        DeserializationError jsonError = deserializeJson(errorDoc, errorResponse);
+
+        if (!jsonError && errorDoc.containsKey("error")) {
+          String errorMessage = errorDoc["error"].as<String>();
+          if (errorDoc.containsKey("details")) {
+            errorMessage += ": " + errorDoc["details"].as<String>();
+          }
+          displayError(errorMessage);
+        } else {
+          displayError("HTTP Error " + String(httpCode));
+        }
+        delay(30000);
+        requestDone = true;
       }
-      delay(30000);
+      http.end();
     }
-    http.end();
   } else {
     displayError("WiFi Lost!");
     Serial.println("WiFi disconnected");
     WiFi.begin(ssid, password);
     delay(30000);
   }
+  
+  if (millis() - lastRefresh > refreshInterval) {
+    fullRefresh();
+    lastRefresh = millis();
+  }
 }
 
 void displayError(const String &message) {
   display.fillScreen(GxEPD_WHITE);
-  // Draw current time in top right
   String currentTime = getCurrentTimeString();
-  display.setCursor(130, 10); // Adjust X for your display width
+  display.setCursor(130, 10);
   display.print(currentTime);
 
   display.setCursor(0, 20);
   display.print(message);
   display.display(true);
 }
+
+
+
 
