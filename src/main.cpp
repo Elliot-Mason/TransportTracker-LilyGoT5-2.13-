@@ -12,7 +12,7 @@ const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 const char* api_url = API_URL;
 unsigned long lastRefresh = 0;
-const unsigned long refreshInterval = 5 * 60 * 1000; // 5 minutes
+const unsigned long refreshInterval = 10 * 60 * 1000; // 5 minutes
 
 void displayError(const String &message);
 
@@ -80,14 +80,12 @@ void setup() {
 
 // Force full inversion refresh to reduce ghosting
 void fullRefresh() {
-  for (int i = 0; i < 2; i++) { // cycle twice
+
     display.fillScreen(GxEPD_BLACK);
     display.display(false);  // full refresh
     delay(500);
     display.fillScreen(GxEPD_WHITE);
     display.display(false);  // full refresh
-    delay(500);
-  }
 }
 
 void loop() {
