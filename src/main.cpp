@@ -116,14 +116,22 @@ void setup() {
     resetCredentials();
   }
 
+  // Check if credentials exist
+  if (WiFi.SSID() == "") {
+    showMessage("No WiFi configured.\nOpening setup...");
+  } else {
+    showMessage("Connecting WiFi...");
+  }
+
   // connect or open AP
-  showMessage("Connecting WiFi...");
   if (!wifiManager.autoConnect("T5-Setup-XXXX")) {
     showMessage("WiFi setup failed");
     ESP.restart();
   }
 
   showMessage("WiFi OK!");
+
+  // Time sync
   configTime(10 * 3600, 0, "au.pool.ntp.org", "time.nist.gov");
   time_t now = time(nullptr);
   while (now < 8 * 3600 * 2) {
@@ -131,6 +139,7 @@ void setup() {
     now = time(nullptr);
   }
 }
+
 
 void loop() {
   // --- Check IO39 button (network reset trigger) ---
