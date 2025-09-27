@@ -133,6 +133,32 @@ void setup() {
 }
 
 void loop() {
+  // --- Check IO39 button (network reset trigger) ---
+  if (digitalRead(39) == LOW) {  // assuming active LOW button
+    Serial.println("IO39 pressed - resetting WiFi credentials...");
+    displayError("Resetting WiFi...");
+    delay(1000);
+
+    WiFi.disconnect(true, true);  // erase stored credentials
+    delay(1000);
+
+    // Start AP mode for reconfiguration
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("TransportTrackerSetup");
+    Serial.println("Access Point started: TransportTrackerSetup");
+
+    display.fillScreen(GxEPD_WHITE);
+    display.setCursor(0, 20);
+    display.print("Setup AP: TransportTrackerSetup");
+    display.display(true);
+
+    // Block here until device is restarted or reconfigured
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  // --- Normal WiFi + Tracker Logic ---
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
     client.setInsecure(); // accept any SSL cert
@@ -290,14 +316,17 @@ void loop() {
       http.end();
     }
   } else {
-    displayError("WiFi Lost!");
-    Serial.println("WiFi disconnected");
-    WiFi.begin(ssid, password);
-    delay(30000);
+     displayError("WiFi Lost! Reconnecting...");
+    Serial.println("WiFi disconnected, retrying...");
+
+    // Try reconnect
+    WiFi.reconnect();
   }
-  
+
+  // --- E-Paper ghosting prevention refresh ---
   if (millis() - lastRefresh > refreshInterval) {
     fullRefresh();
     lastRefresh = millis();
   }
 }
+
