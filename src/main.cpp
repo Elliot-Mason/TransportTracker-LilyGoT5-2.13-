@@ -3,18 +3,47 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include "secrets.h"
+#include <WiFiManager.h>   // captive portal
+#include <Preferences.h>
+#include <secrets.h>  // contains WiFi SSID/PASSWORD and API_URL
 
 #include <GxEPD2_BW.h>
 GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/ 5, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
 
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
+#define BUTTON_PIN 39
+const char* BUILD_TAG = "build_v2.0";   // bump this when flashing new firmware
+
+Preferences prefs;
+WiFiManager wifiManager;
+
 const char* api_url = API_URL;
 unsigned long lastRefresh = 0;
 const unsigned long refreshInterval = 10 * 60 * 1000; // 5 minutes
 
 void displayError(const String &message);
+
+// --- Helpers ---
+void showMessage(const char* msg) {
+  display.setRotation(1);
+  display.setFont(NULL);
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.fillScreen(GxEPD_WHITE);
+  display.setTextColor(GxEPD_BLACK);
+  display.println(msg);
+  display.display();
+  Serial.println(msg);
+}
+
+void resetCredentials() {
+  wifiManager.resetSettings();
+  prefs.begin("app", false);
+  prefs.putString("build_tag", BUILD_TAG);
+  prefs.end();
+  showMessage("WiFi creds reset.\nRebooting...");
+  delay(2000);
+  ESP.restart();
+}
 
 // Get current time as a string in 12-hour format with AM/PM
 String getCurrentTimeString() {
@@ -45,47 +74,62 @@ String getRouteLabel(const String& routeType) {
   return routeType;
 }
 
-void setup() {
-  Serial.begin(115200);
-  display.init();
-  display.setRotation(1);
-  display.setTextColor(GxEPD_BLACK);
-
-  WiFi.begin(ssid, password);
-  display.fillScreen(GxEPD_WHITE);
-  display.setCursor(0, 20);
-  display.print("Connecting to WiFi...");
-  display.display(true);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  display.fillScreen(GxEPD_WHITE);
-  display.setCursor(0, 20);
-  display.print("WiFi Connected!");
-  display.display(true);
-  delay(1000);
-
-  configTime(10 * 3600, 0, "au.pool.ntp.org", "time.nist.gov");
-  Serial.print("Waiting for NTP time sync...");
-  time_t now = time(nullptr);
-  while (now < 8 * 3600 * 2) {
-    delay(500);
-    Serial.print(".");
-    now = time(nullptr);
-  }
-  Serial.println(" done!");
-}
-
 // Force full inversion refresh to reduce ghosting
 void fullRefresh() {
-
     display.fillScreen(GxEPD_BLACK);
     display.display(false);  // full refresh
     delay(500);
     display.fillScreen(GxEPD_WHITE);
     display.display(false);  // full refresh
+}
+
+void displayError(const String &message) {
+  display.fillScreen(GxEPD_WHITE);
+  String currentTime = getCurrentTimeString();
+  display.setCursor(130, 10);
+  display.print(currentTime);
+
+  display.setCursor(0, 20);
+  display.print(message);
+  display.display(true);
+}
+
+void setup() {
+  Serial.begin(115200);
+  display.init(115200);
+  pinMode(BUTTON_PIN, INPUT);
+
+  showMessage("Starting...");
+
+  // firmware build check
+  prefs.begin("app", false);
+  String savedTag = prefs.getString("build_tag", "");
+  prefs.end();
+  if (savedTag != BUILD_TAG) {
+    showMessage("New build.\nReset WiFi...");
+    resetCredentials();
+  }
+
+  // button check
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    showMessage("Button pressed.\nReset WiFi...");
+    resetCredentials();
+  }
+
+  // connect or open AP
+  showMessage("Connecting WiFi...");
+  if (!wifiManager.autoConnect("T5-Setup-XXXX")) {
+    showMessage("WiFi setup failed");
+    ESP.restart();
+  }
+
+  showMessage("WiFi OK!");
+  configTime(10 * 3600, 0, "au.pool.ntp.org", "time.nist.gov");
+  time_t now = time(nullptr);
+  while (now < 8 * 3600 * 2) {
+    delay(500);
+    now = time(nullptr);
+  }
 }
 
 void loop() {
@@ -257,18 +301,3 @@ void loop() {
     lastRefresh = millis();
   }
 }
-
-void displayError(const String &message) {
-  display.fillScreen(GxEPD_WHITE);
-  String currentTime = getCurrentTimeString();
-  display.setCursor(130, 10);
-  display.print(currentTime);
-
-  display.setCursor(0, 20);
-  display.print(message);
-  display.display(true);
-}
-
-
-
-
