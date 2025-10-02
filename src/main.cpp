@@ -10,7 +10,9 @@
 GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/ 5, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
 
 #define BUTTON_PIN 39
-const char* BUILD_TAG = "build_v3.2";   // bump this when flashing new firmware
+const char* BUILD_TAG = "build_v3.4";   // bump this when flashing new firmware
+
+#define FORCE_SETUP_KEY "force_setup"
 
 Preferences prefs;
 WiFiManager wifiManager;
@@ -18,7 +20,7 @@ WiFiManager wifiManager;
 // --- Station codes (saved in Preferences) ---
 char origin_code[16] = "10101252";      // default Penrith
 char destination_code[16] = "10101100"; // default Central
-
+ 
 // --- WiFiManager Parameters ---
 WiFiManagerParameter custom_origin("origin_code", "Origin Station Code", origin_code, 16);
 WiFiManagerParameter custom_dest("dest_code", "Destination Station Code", destination_code, 16);
@@ -47,6 +49,7 @@ void resetCredentials() {
   wifiManager.resetSettings();
   prefs.begin("app", false);
   prefs.putString("build_tag", BUILD_TAG);
+  prefs.putBool(FORCE_SETUP_KEY, true);   // tell next boot to go into setup mode
   prefs.end();
   showMessage("WiFi creds reset.\nRebooting...");
   delay(2000);
@@ -106,15 +109,25 @@ void setup() {
   Serial.begin(115200);
   display.init(115200);
   pinMode(BUTTON_PIN, INPUT);
-  
-  showMessage("Starting...");
 
+  prefs.begin("app", false);
+  bool forceSetup = prefs.getBool(FORCE_SETUP_KEY, false);
+  prefs.end();
+
+  if (forceSetup == true) {
+    prefs.putBool(FORCE_SETUP_KEY, false);
+    showMessage("Please configure WiFi");
+  } else {
+    showMessage("Starting...");
+  }
+ 
   // firmware build check
   prefs.begin("app", false);
   String savedTag = prefs.getString("build_tag", "");
   prefs.end();
   if (savedTag != BUILD_TAG) {
     showMessage("New build.\nReset WiFi...");
+    delay(2000);
     resetCredentials();
   }
 
