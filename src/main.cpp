@@ -166,7 +166,7 @@ void setup() {
   originStr.toCharArray(origin_code, sizeof(origin_code));
   destStr.toCharArray(destination_code, sizeof(destination_code));
 
-  showMessage("WiFi OK!");
+  showMessage("WiFi OK!\n Requesting information, Please wait...");
 
   // Time sync
   configTime(10 * 3600, 0, "au.pool.ntp.org", "time.nist.gov");
