@@ -5,18 +5,26 @@
 #include <time.h>
 #include <WiFiManager.h>   // captive portal
 #include <Preferences.h>
-#include <secrets.h>  // contains WiFi SSID/PASSWORD and API_URL
 
 #include <GxEPD2_BW.h>
 GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/ 5, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
 
 #define BUTTON_PIN 39
-const char* BUILD_TAG = "build_v2.0";   // bump this when flashing new firmware
+const char* BUILD_TAG = "build_v3.2";   // bump this when flashing new firmware
 
 Preferences prefs;
 WiFiManager wifiManager;
 
-const char* api_url = API_URL;
+// --- Station codes (saved in Preferences) ---
+char origin_code[16] = "10101252";      // default Penrith
+char destination_code[16] = "10101100"; // default Central
+
+// --- WiFiManager Parameters ---
+WiFiManagerParameter custom_origin("origin_code", "Origin Station Code", origin_code, 16);
+WiFiManagerParameter custom_dest("dest_code", "Destination Station Code", destination_code, 16);
+
+String api_url_base = "https://transport-tracker-server.vercel.app/api/trains?name_origin=";
+
 unsigned long lastRefresh = 0;
 const unsigned long refreshInterval = 10 * 60 * 1000; // 5 minutes
 
@@ -98,7 +106,7 @@ void setup() {
   Serial.begin(115200);
   display.init(115200);
   pinMode(BUTTON_PIN, INPUT);
-
+  
   showMessage("Starting...");
 
   // firmware build check
@@ -116,18 +124,34 @@ void setup() {
     resetCredentials();
   }
 
-  // Check if credentials exist
-  if (WiFi.SSID() == "") {
-    showMessage("No WiFi configured.\nOpening setup...");
-  } else {
-    showMessage("Connecting WiFi...");
-  }
+  // Load stored station codes
+  prefs.begin("app", true);
+  String storedOrigin = prefs.getString("origin", origin_code);
+  String storedDest   = prefs.getString("destination", destination_code);
+  prefs.end();
+  storedOrigin.toCharArray(origin_code, sizeof(origin_code));
+  storedDest.toCharArray(destination_code, sizeof(destination_code));
+
+  // Add station parameters to WiFiManager portal
+  wifiManager.addParameter(&custom_origin);
+  wifiManager.addParameter(&custom_dest);
 
   // connect or open AP
-  if (!wifiManager.autoConnect("T5-Setup-XXXX")) {
+  if (!wifiManager.autoConnect("TransportTrackerSetup")) {
     showMessage("WiFi setup failed");
     ESP.restart();
   }
+
+  // Save station codes entered by user
+  prefs.begin("app", false);
+  prefs.putString("origin", custom_origin.getValue());
+  prefs.putString("destination", custom_dest.getValue());
+  prefs.end();
+
+  String originStr = prefs.getString("origin", origin_code);
+  String destStr   = prefs.getString("destination", destination_code);
+  originStr.toCharArray(origin_code, sizeof(origin_code));
+  destStr.toCharArray(destination_code, sizeof(destination_code));
 
   showMessage("WiFi OK!");
 
@@ -143,28 +167,16 @@ void setup() {
 
 void loop() {
   // --- Check IO39 button (network reset trigger) ---
-  if (digitalRead(39) == LOW) {  // assuming active LOW button
+  if (digitalRead(39) == LOW) {
     Serial.println("IO39 pressed - resetting WiFi credentials...");
     displayError("Resetting WiFi...");
-    delay(1000);
-
-    WiFi.disconnect(true, true);  // erase stored credentials
-    delay(1000);
-
-    // Start AP mode for reconfiguration
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("TransportTrackerSetup");
+    resetCredentials();
     Serial.println("Access Point started: TransportTrackerSetup");
-
     display.fillScreen(GxEPD_WHITE);
     display.setCursor(0, 20);
     display.print("Setup AP: TransportTrackerSetup");
     display.display(true);
-
-    // Block here until device is restarted or reconfigured
-    while (true) {
-      delay(1000);
-    }
+    while (true) { delay(1000); }
   }
 
   // --- Normal WiFi + Tracker Logic ---
@@ -173,11 +185,14 @@ void loop() {
     client.setInsecure(); // accept any SSL cert
     HTTPClient http;
 
-    String currentUrl = api_url;
+    // Build API URL dynamically
+    String currentUrl = api_url_base + origin_code + "&name_destination=" + destination_code;
+    Serial.println("API Request: " + currentUrl);
+
     bool requestDone = false;
 
     while (!requestDone) {
-      http.begin(client, currentUrl);
+      http.begin(client, currentUrl.c_str());
       int httpCode = http.GET();
 
       if (httpCode == HTTP_CODE_OK) {
@@ -186,7 +201,6 @@ void loop() {
         DeserializationError error = deserializeJson(doc, payload);
 
         if (!error) {
-          // Find the next train departing after current time
           JsonObject nextTrain;
           time_t nowTime = time(nullptr);
 
@@ -284,58 +298,23 @@ void loop() {
           delay(30000);
         } else {
           displayError("JSON Error: " + String(error.c_str()));
-          Serial.print("JSON parse error: ");
-          Serial.println(error.c_str());
           delay(30000);
         }
         requestDone = true;
-      } else if (httpCode == 308) {
-        String newLocation = http.getLocation();
-        http.end();
-        currentUrl = newLocation; // follow redirect
-      } else if (httpCode == -1) {
-        String errMsg = "HTTP Connection failed Retrying now";
-        Serial.print(errMsg);
-        Serial.print(": ");
-        Serial.println(http.errorToString(httpCode));
-        displayError(errMsg);
-        delay(1000);
       } else {
-        String errorResponse = http.getString();
-        Serial.print("HTTP Error: ");
-        Serial.print(httpCode);
-        Serial.print(" - Response: ");
-        Serial.println(errorResponse);
-
-        StaticJsonDocument<1024> errorDoc;
-        DeserializationError jsonError = deserializeJson(errorDoc, errorResponse);
-
-        if (!jsonError && errorDoc.containsKey("error")) {
-          String errorMessage = errorDoc["error"].as<String>();
-          if (errorDoc.containsKey("details")) {
-            errorMessage += ": " + errorDoc["details"].as<String>();
-          }
-          displayError(errorMessage);
-        } else {
-          displayError("HTTP Error " + String(httpCode));
-        }
+        displayError("HTTP Error " + String(httpCode));
         delay(30000);
         requestDone = true;
       }
       http.end();
     }
   } else {
-     displayError("WiFi Lost! Reconnecting...");
-    Serial.println("WiFi disconnected, retrying...");
-
-    // Try reconnect
+    displayError("WiFi Lost! Reconnecting...");
     WiFi.reconnect();
   }
 
-  // --- E-Paper ghosting prevention refresh ---
   if (millis() - lastRefresh > refreshInterval) {
     fullRefresh();
     lastRefresh = millis();
   }
 }
-
