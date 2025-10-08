@@ -3,16 +3,14 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include <WiFiManager.h>   // captive portal
+#include <WiFiManager.h> // captive portal
 #include <Preferences.h>
 
 #include <GxEPD2_BW.h>
-GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/ 5, /*DC=*/ 17, /*RST=*/ 16, /*BUSY=*/ 4));
+GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/5, /*DC=*/17, /*RST=*/16, /*BUSY=*/4));
 
 #define BUTTON_PIN 39
-const char* BUILD_TAG = "build_v3.4";   // bump this when flashing new firmware
-
-#define FORCE_SETUP_KEY "force_setup"
+const char *BUILD_TAG = "build_v3.8"; // bump this when flashing new firmware
 
 Preferences prefs;
 WiFiManager wifiManager;
@@ -20,7 +18,7 @@ WiFiManager wifiManager;
 // --- Station codes (saved in Preferences) ---
 char origin_code[16] = "10101252";      // default Penrith
 char destination_code[16] = "10101100"; // default Central
- 
+
 // --- WiFiManager Parameters ---
 WiFiManagerParameter custom_origin("origin_code", "Origin Station Code", origin_code, 16);
 WiFiManagerParameter custom_dest("dest_code", "Destination Station Code", destination_code, 16);
@@ -28,12 +26,71 @@ WiFiManagerParameter custom_dest("dest_code", "Destination Station Code", destin
 String api_url_base = "https://transport-tracker-server.vercel.app/api/trains?name_origin=";
 
 unsigned long lastRefresh = 0;
-const unsigned long refreshInterval = 10 * 60 * 1000; // 5 minutes
+const unsigned long refreshInterval = 10 * 60 * 1000; // 10 minutes
 
 void displayError(const String &message);
 
+// --- Timezone and Conversion Helpers ---
+
+// Define the Sydney timezone string using the standard POSIX format.
+// This relies on the default 1-hour DST shift being applied when the M10.1.0,M4.1.0/3 rules are active.
+const char *SYDNEY_TZ = "AEST-10AEDT,M10.1.0,M4.1.0/3";
+
+// Function to set the system's time zone to local (Sydney)
+void setLocalTimezone() {
+  // Use configTzTime to set the local timezone (AEST/AEDT)
+  configTzTime(SYDNEY_TZ, "au.pool.ntp.org", "time.nist.gov");
+}
+
+// Converts a UTC ISO 8601 string (e.g., 2025-10-08T09:26:30) to the correct UTC epoch time (time_t)
+time_t utcIsoToEpoch(const String &isoTime) {
+  struct tm t = {};
+  
+  // 1. Temporarily set TZ to UTC to correctly interpret the API's UTC string
+  setenv("TZ", "UTC0", 1);
+  tzset();
+
+  strptime(isoTime.c_str(), "%Y-%m-%dT%H:%M:%S", &t);
+  t.tm_isdst = 0; // UTC does not observe DST
+  
+  // mktime now correctly interprets the struct as UTC time because TZ is temporarily UTC.
+  time_t utc_epoch = mktime(&t);
+
+  // 2. Restore local TZ configuration
+  setLocalTimezone(); 
+  
+  return utc_epoch;
+}
+
+// Formats a UTC ISO 8601 string into a local 12-hour time string (e.g., 09:26 AM)
+String formatTime(const String &isoTime) {
+  time_t raw = utcIsoToEpoch(isoTime); // Get the correct UTC epoch time
+
+  struct tm local;
+  localtime_r(&raw, &local); // Convert UTC epoch to local time struct (using the restored TZ)
+
+  int hour = local.tm_hour;
+  int minute = local.tm_min;
+  String ampm = "AM";
+  if (hour == 0)
+    hour = 12; 
+  else if (hour == 12)
+    ampm = "PM";
+  else if (hour > 12)
+  {
+    hour -= 12;
+    ampm = "PM";
+  }
+
+  char buf[10];
+  snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
+  return String(buf);
+}
+
+
 // --- Helpers ---
-void showMessage(const char* msg) {
+void showMessage(const char *msg)
+{
   display.setRotation(1);
   display.setFont(NULL);
   display.setTextSize(1);
@@ -45,11 +102,11 @@ void showMessage(const char* msg) {
   Serial.println(msg);
 }
 
-void resetCredentials() {
+void resetCredentials()
+{
   wifiManager.resetSettings();
   prefs.begin("app", false);
   prefs.putString("build_tag", BUILD_TAG);
-  prefs.putBool(FORCE_SETUP_KEY, true);   // tell next boot to go into setup mode
   prefs.end();
   showMessage("WiFi creds reset.\nRebooting...");
   delay(2000);
@@ -57,7 +114,8 @@ void resetCredentials() {
 }
 
 // Get current time as a string in 12-hour format with AM/PM
-String getCurrentTimeString() {
+String getCurrentTimeString()
+{
   time_t now = time(nullptr);
   struct tm timeinfo;
   localtime_r(&now, &timeinfo);
@@ -65,11 +123,16 @@ String getCurrentTimeString() {
   int hour = timeinfo.tm_hour;
   int minute = timeinfo.tm_min;
   String ampm = "AM";
-  if (hour == 0) {
+  if (hour == 0)
+  {
     hour = 12;
-  } else if (hour == 12) {
+  }
+  else if (hour == 12)
+  {
     ampm = "PM";
-  } else if (hour > 12) {
+  }
+  else if (hour > 12)
+  {
     hour -= 12;
     ampm = "PM";
   }
@@ -79,22 +142,27 @@ String getCurrentTimeString() {
 }
 
 // Map route type to label
-String getRouteLabel(const String& routeType) {
-  if (routeType == "BMT") return "Intercity";
-  if (routeType == "T1") return "T1";
+String getRouteLabel(const String &routeType)
+{
+  if (routeType == "BMT")
+    return "Intercity";
+  if (routeType == "T1")
+    return "T1";
   return routeType;
 }
 
 // Force full inversion refresh to reduce ghosting
-void fullRefresh() {
-    display.fillScreen(GxEPD_BLACK);
-    display.display(false);  // full refresh
-    delay(500);
-    display.fillScreen(GxEPD_WHITE);
-    display.display(false);  // full refresh
+void fullRefresh()
+{
+  display.fillScreen(GxEPD_BLACK);
+  display.display(false); // full refresh
+  delay(500);
+  display.fillScreen(GxEPD_WHITE);
+  display.display(false); // full refresh
 }
 
-void displayError(const String &message) {
+void displayError(const String &message)
+{
   display.fillScreen(GxEPD_WHITE);
   String currentTime = getCurrentTimeString();
   display.setCursor(130, 10);
@@ -105,34 +173,26 @@ void displayError(const String &message) {
   display.display(true);
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   display.init(115200);
   pinMode(BUTTON_PIN, INPUT);
 
-  prefs.begin("app", false);
-  bool forceSetup = prefs.getBool(FORCE_SETUP_KEY, false);
-  prefs.end();
-
-  if (forceSetup == true) {
-    prefs.putBool(FORCE_SETUP_KEY, false);
-    showMessage("Please configure WiFi");
-  } else {
-    showMessage("Starting...");
-  }
- 
   // firmware build check
   prefs.begin("app", false);
   String savedTag = prefs.getString("build_tag", "");
   prefs.end();
-  if (savedTag != BUILD_TAG) {
+  if (savedTag != BUILD_TAG)
+  {
     showMessage("New build.\nReset WiFi...");
-    delay(2000);
+    delay(4000);
     resetCredentials();
   }
 
   // button check
-  if (digitalRead(BUTTON_PIN) == LOW) {
+  if (digitalRead(BUTTON_PIN) == LOW)
+  {
     showMessage("Button pressed.\nReset WiFi...");
     resetCredentials();
   }
@@ -140,7 +200,7 @@ void setup() {
   // Load stored station codes
   prefs.begin("app", true);
   String storedOrigin = prefs.getString("origin", origin_code);
-  String storedDest   = prefs.getString("destination", destination_code);
+  String storedDest = prefs.getString("destination", destination_code);
   prefs.end();
   storedOrigin.toCharArray(origin_code, sizeof(origin_code));
   storedDest.toCharArray(destination_code, sizeof(destination_code));
@@ -150,7 +210,8 @@ void setup() {
   wifiManager.addParameter(&custom_dest);
 
   // connect or open AP
-  if (!wifiManager.autoConnect("TransportTrackerSetup")) {
+  if (!wifiManager.autoConnect("TransportTrackerSetup"))
+  {
     showMessage("WiFi setup failed");
     ESP.restart();
   }
@@ -162,25 +223,27 @@ void setup() {
   prefs.end();
 
   String originStr = prefs.getString("origin", origin_code);
-  String destStr   = prefs.getString("destination", destination_code);
+  String destStr = prefs.getString("destination", destination_code);
   originStr.toCharArray(origin_code, sizeof(origin_code));
   destStr.toCharArray(destination_code, sizeof(destination_code));
 
-  showMessage("WiFi OK!\n Requesting information, Please wait...");
+  showMessage("WiFi OK!\nRequesting information.\nPlease wait...");
 
-  // Time sync
-  configTime(10 * 3600, 0, "au.pool.ntp.org", "time.nist.gov");
+  // Time sync and TZ configuration
+  setLocalTimezone();
   time_t now = time(nullptr);
-  while (now < 8 * 3600 * 2) {
+  while (now < 8 * 3600 * 2) // Wait for time sync
+  {
     delay(500);
     now = time(nullptr);
   }
 }
 
-
-void loop() {
+void loop()
+{
   // --- Check IO39 button (network reset trigger) ---
-  if (digitalRead(39) == LOW) {
+  if (digitalRead(39) == LOW)
+  {
     Serial.println("IO39 pressed - resetting WiFi credentials...");
     displayError("Resetting WiFi...");
     resetCredentials();
@@ -189,11 +252,16 @@ void loop() {
     display.setCursor(0, 20);
     display.print("Setup AP: TransportTrackerSetup");
     display.display(true);
-    while (true) { delay(1000); }
+    // Loop indefinitely while waiting for user to configure
+    while (true)
+    {
+      delay(1000);
+    }
   }
 
   // --- Normal WiFi + Tracker Logic ---
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED)
+  {
     WiFiClientSecure client;
     client.setInsecure(); // accept any SSL cert
     HTTPClient http;
@@ -204,33 +272,39 @@ void loop() {
 
     bool requestDone = false;
 
-    while (!requestDone) {
+    while (!requestDone)
+    {
       http.begin(client, currentUrl.c_str());
       int httpCode = http.GET();
 
-      if (httpCode == HTTP_CODE_OK) {
+      if (httpCode == HTTP_CODE_OK)
+      {
         String payload = http.getString();
         StaticJsonDocument<8192> doc;
         DeserializationError error = deserializeJson(doc, payload);
 
-        if (!error) {
+        if (!error)
+        {
           JsonObject nextTrain;
-          time_t nowTime = time(nullptr);
+          // time(nullptr) returns the current UTC epoch time
+          time_t nowTime = time(nullptr); 
 
-          for (JsonObject train : doc.as<JsonArray>()) {
+          for (JsonObject train : doc.as<JsonArray>())
+          {
             String depTimeStr = train["legs"][0]["origin"]["departureTimePlanned"].as<String>();
-            struct tm depTimeInfo = {};
-            strptime(depTimeStr.c_str(), "%Y-%m-%dT%H:%M:%S", &depTimeInfo);
-            time_t depTime = mktime(&depTimeInfo);
-            depTime -= 10 * 3600; // adjust for AEST (UTC+10)
+            
+            // CORRECT: Convert the UTC time string to the correct UTC epoch time for comparison
+            time_t depTime = utcIsoToEpoch(depTimeStr);
 
-            if (depTime >= nowTime) {
+            if (depTime >= nowTime)
+            {
               nextTrain = train;
               break;
             }
           }
 
-          if (nextTrain.isNull()) nextTrain = doc[0].as<JsonObject>();
+          if (nextTrain.isNull())
+            nextTrain = doc[0].as<JsonObject>();
 
           JsonObject origin = nextTrain["legs"][0]["origin"];
           JsonObject destination = nextTrain["legs"][0]["destination"];
@@ -243,36 +317,28 @@ void loop() {
           String routeType = nextTrain["legs"][0]["transportation"]["disassembledName"].as<String>();
           String routeLabel = getRouteLabel(routeType);
 
-          auto extractPlatform = [](const String& name) -> String {
+          auto extractPlatform = [](const String &name) -> String
+          {
             int idx = name.indexOf("Platform ");
-            if (idx >= 0) {
+            if (idx >= 0)
+            {
               int end = name.indexOf(",", idx);
-              if (end < 0) end = name.length();
+              if (end < 0)
+                end = name.length();
               return name.substring(idx, end);
             }
             return "";
           };
 
-          auto extractStation = [](const String& name) -> String {
+          auto extractStation = [](const String &name) -> String
+          {
             int idx = name.indexOf(",");
-            if (idx >= 0) return name.substring(0, idx);
+            if (idx >= 0)
+              return name.substring(0, idx);
             return name;
           };
 
-          auto formatTime = [](const String& isoTime) -> String {
-            int hour = isoTime.substring(11, 13).toInt();
-            int minute = isoTime.substring(14, 16).toInt();
-            hour += 10;
-            if (hour >= 24) hour -= 24;
-            String ampm = "AM";
-            if (hour == 0) hour = 12;
-            else if (hour == 12) ampm = "PM";
-            else if (hour > 12) { hour -= 12; ampm = "PM"; }
-            char buf[10];
-            snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
-            return String(buf);
-          };
-
+          // Use the new, fixed `formatTime` function
           String originStation = extractStation(originName);
           String originPlatform = extractPlatform(originName);
           String originTime = formatTime(originTimeRaw);
@@ -281,6 +347,7 @@ void loop() {
           String destPlatform = extractPlatform(destName);
           String destTime = formatTime(destTimeRaw);
 
+          // Display logic
           display.fillScreen(GxEPD_WHITE);
           display.fillRect(0, 0, display.width(), 15, GxEPD_BLACK);
           display.setTextColor(GxEPD_WHITE);
@@ -306,27 +373,38 @@ void loop() {
 
           display.setCursor(10, display.height() - 20);
           display.print(routeLabel);
+          
+          // Show current time in the corner
+          display.setCursor(display.width() - 50, display.height() - 10);
+          display.print(getCurrentTimeString()); 
 
           display.display(true);
           delay(30000);
-        } else {
+        }
+        else
+        {
           displayError("JSON Error: " + String(error.c_str()));
           delay(30000);
         }
         requestDone = true;
-      } else {
+      }
+      else
+      {
         displayError("HTTP Error " + String(httpCode));
         delay(30000);
         requestDone = true;
       }
       http.end();
     }
-  } else {
+  }
+  else
+  {
     displayError("WiFi Lost! Reconnecting...");
     WiFi.reconnect();
   }
 
-  if (millis() - lastRefresh > refreshInterval) {
+  if (millis() - lastRefresh > refreshInterval)
+  {
     fullRefresh();
     lastRefresh = millis();
   }
