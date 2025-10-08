@@ -26,7 +26,7 @@ WiFiManagerParameter custom_dest("dest_code", "Destination Station Code", destin
 String api_url_base = "https://transport-tracker-server.vercel.app/api/trains?name_origin=";
 
 unsigned long lastRefresh = 0;
-const unsigned long refreshInterval = 5 * 60 * 1000; // 5 minutes
+const unsigned long refreshInterval = 10 * 60 * 1000; // 10 minutes
 
 void displayError(const String &message);
 
