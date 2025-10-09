@@ -9,6 +9,10 @@ extern const char *SYDNEY_TZ;
 
 void setLocalTimezone();
 time_t utcIsoToEpoch(const String &isoTime);
+
+// New declaration needed for the manual DST offset calculation
+long getSydneyDSTOffset(struct tm *local_t);
+
 String formatTime(const String &isoTime);
 String getCurrentTimeString();
 
