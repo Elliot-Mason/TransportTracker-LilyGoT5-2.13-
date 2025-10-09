@@ -1,23 +1,22 @@
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
-#include <time.h>
 #include <WiFiManager.h> // captive portal
 #include <Preferences.h>
 
-#include <GxEPD2_BW.h>
-GxEPD2_BW<GxEPD2_213_T5D, GxEPD2_213_T5D::HEIGHT> display(GxEPD2_213_T5D(/*CS=*/5, /*DC=*/17, /*RST=*/16, /*BUSY=*/4));
+// Include your custom modules
+#include "TimeUtils.h"
+#include "DisplayManager.h"
+#include "DataFetcher.h"
 
 #define BUTTON_PIN 39
 const char *BUILD_TAG = "build_v3.8"; // bump this when flashing new firmware
 
+// Global/external objects
 Preferences prefs;
 WiFiManager wifiManager;
 
 // --- Station codes (saved in Preferences) ---
-char origin_code[16] = "10101252";      // default Penrith
-char destination_code[16] = "10101100"; // default Central
+char origin_code[16] = "10101252";       // default Penrith
+char destination_code[16] = "10101100";  // default Central
 
 // --- WiFiManager Parameters ---
 WiFiManagerParameter custom_origin("origin_code", "Origin Station Code", origin_code, 16);
@@ -26,82 +25,12 @@ WiFiManagerParameter custom_dest("dest_code", "Destination Station Code", destin
 String api_url_base = "https://transport-tracker-server.vercel.app/api/trains?name_origin=";
 
 unsigned long lastRefresh = 0;
-const unsigned long refreshInterval = 10 * 60 * 1000; // 10 minutes
-
-void displayError(const String &message);
-
-// --- Timezone and Conversion Helpers ---
-
-// Define the Sydney timezone string using the standard POSIX format.
-// This relies on the default 1-hour DST shift being applied when the M10.1.0,M4.1.0/3 rules are active.
-const char *SYDNEY_TZ = "AEST-10AEDT,M10.1.0,M4.1.0/3";
-
-// Function to set the system's time zone to local (Sydney)
-void setLocalTimezone() {
-  // Use configTzTime to set the local timezone (AEST/AEDT)
-  configTzTime(SYDNEY_TZ, "au.pool.ntp.org", "time.nist.gov");
-}
-
-// Converts a UTC ISO 8601 string (e.g., 2025-10-08T09:26:30) to the correct UTC epoch time (time_t)
-time_t utcIsoToEpoch(const String &isoTime) {
-  struct tm t = {};
-  
-  // 1. Temporarily set TZ to UTC to correctly interpret the API's UTC string
-  setenv("TZ", "UTC0", 1);
-  tzset();
-
-  strptime(isoTime.c_str(), "%Y-%m-%dT%H:%M:%S", &t);
-  t.tm_isdst = 0; // UTC does not observe DST
-  
-  // mktime now correctly interprets the struct as UTC time because TZ is temporarily UTC.
-  time_t utc_epoch = mktime(&t);
-
-  // 2. Restore local TZ configuration
-  setLocalTimezone(); 
-  
-  return utc_epoch;
-}
-
-// Formats a UTC ISO 8601 string into a local 12-hour time string (e.g., 09:26 AM)
-String formatTime(const String &isoTime) {
-  time_t raw = utcIsoToEpoch(isoTime); // Get the correct UTC epoch time
-
-  struct tm local;
-  localtime_r(&raw, &local); // Convert UTC epoch to local time struct (using the restored TZ)
-
-  int hour = local.tm_hour;
-  int minute = local.tm_min;
-  String ampm = "AM";
-  if (hour == 0)
-    hour = 12; 
-  else if (hour == 12)
-    ampm = "PM";
-  else if (hour > 12)
-  {
-    hour -= 12;
-    ampm = "PM";
-  }
-
-  char buf[10];
-  snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
-  return String(buf);
-}
+const unsigned long refreshInterval = 10 * 60 * 1000; // 10 minutes (10 minutes * 60 seconds * 1000 ms)
 
 
-// --- Helpers ---
-void showMessage(const char *msg)
-{
-  display.setRotation(1);
-  display.setFont(NULL);
-  display.setTextSize(1);
-  display.setCursor(0, 20);
-  display.fillScreen(GxEPD_WHITE);
-  display.setTextColor(GxEPD_BLACK);
-  display.println(msg);
-  display.display();
-  Serial.println(msg);
-}
-
+/**
+ * @brief Resets WiFi credentials and station codes, then reboots the ESP32.
+ */
 void resetCredentials()
 {
   wifiManager.resetSettings();
@@ -113,99 +42,40 @@ void resetCredentials()
   ESP.restart();
 }
 
-// Get current time as a string in 12-hour format with AM/PM
-String getCurrentTimeString()
-{
-  time_t now = time(nullptr);
-  struct tm timeinfo;
-  localtime_r(&now, &timeinfo);
-
-  int hour = timeinfo.tm_hour;
-  int minute = timeinfo.tm_min;
-  String ampm = "AM";
-  if (hour == 0)
-  {
-    hour = 12;
-  }
-  else if (hour == 12)
-  {
-    ampm = "PM";
-  }
-  else if (hour > 12)
-  {
-    hour -= 12;
-    ampm = "PM";
-  }
-  char buf[10];
-  snprintf(buf, sizeof(buf), "%02d:%02d %s", hour, minute, ampm.c_str());
-  return String(buf);
-}
-
-// Map route type to label
-String getRouteLabel(const String &routeType)
-{
-  if (routeType == "BMT")
-    return "Intercity";
-  if (routeType == "T1")
-    return "T1";
-  return routeType;
-}
-
-// Force full inversion refresh to reduce ghosting
-void fullRefresh()
-{
-  display.fillScreen(GxEPD_BLACK);
-  display.display(false); // full refresh
-  delay(500);
-  display.fillScreen(GxEPD_WHITE);
-  display.display(false); // full refresh
-}
-
-void displayError(const String &message)
-{
-  display.fillScreen(GxEPD_WHITE);
-  String currentTime = getCurrentTimeString();
-  display.setCursor(130, 10);
-  display.print(currentTime);
-
-  display.setCursor(0, 20);
-  display.print(message);
-  display.display(true);
-}
 
 void setup()
 {
   Serial.begin(115200);
   display.init(115200);
-  pinMode(BUTTON_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Assuming IO39 is pulled up and button pulls it LOW
 
-  // firmware build check
+  // --- Firmware build check ---
   prefs.begin("app", false);
   String savedTag = prefs.getString("build_tag", "");
   prefs.end();
   if (savedTag != BUILD_TAG)
   {
-    showMessage("New build.\nReset WiFi...");
+    showMessage("New build.\nResetting WiFi...");
     delay(4000);
     resetCredentials();
   }
 
-  // button check
+  // --- Button check at boot (initial press) ---
   if (digitalRead(BUTTON_PIN) == LOW)
   {
-    showMessage("Button pressed.\nReset WiFi...");
+    showMessage("Button pressed at boot.\nResetting WiFi...");
     resetCredentials();
   }
 
-  // Load stored station codes
-  prefs.begin("app", true);
+  // --- Load stored station codes ---
+  prefs.begin("app", true); // read-only
   String storedOrigin = prefs.getString("origin", origin_code);
   String storedDest = prefs.getString("destination", destination_code);
   prefs.end();
   storedOrigin.toCharArray(origin_code, sizeof(origin_code));
   storedDest.toCharArray(destination_code, sizeof(destination_code));
 
-  // Add station parameters to WiFiManager portal
+  // --- WiFiManager Configuration ---
   wifiManager.addParameter(&custom_origin);
   wifiManager.addParameter(&custom_dest);
 
@@ -216,195 +86,83 @@ void setup()
     ESP.restart();
   }
 
-  // Save station codes entered by user
-  prefs.begin("app", false);
+  // Save station codes entered by user in the captive portal
+  prefs.begin("app", false); // writable
   prefs.putString("origin", custom_origin.getValue());
   prefs.putString("destination", custom_dest.getValue());
   prefs.end();
 
-  String originStr = prefs.getString("origin", origin_code);
-  String destStr = prefs.getString("destination", destination_code);
+  // Reload the potentially new station codes
+  String originStr = custom_origin.getValue();
+  String destStr = custom_dest.getValue();
   originStr.toCharArray(origin_code, sizeof(origin_code));
   destStr.toCharArray(destination_code, sizeof(destination_code));
 
   showMessage("WiFi OK!\nRequesting information.\nPlease wait...");
 
-  // Time sync and TZ configuration
+  // --- Time sync and TZ configuration ---
   setLocalTimezone();
   time_t now = time(nullptr);
-  while (now < 8 * 3600 * 2) // Wait for time sync
+  // Wait for time sync (check if time is reasonable)
+  while (now < 8 * 3600 * 2) 
   {
     delay(500);
     now = time(nullptr);
+    Serial.print(".");
   }
+  Serial.println("\nTime Synced.");
 }
 
 void loop()
 {
-  // --- Check IO39 button (network reset trigger) ---
-  if (digitalRead(39) == LOW)
+  // --- Check IO39 button (network reset trigger during runtime) ---
+  if (digitalRead(BUTTON_PIN) == LOW)
   {
     Serial.println("IO39 pressed - resetting WiFi credentials...");
     displayError("Resetting WiFi...");
-    resetCredentials();
-    Serial.println("Access Point started: TransportTrackerSetup");
-    display.fillScreen(GxEPD_WHITE);
-    display.setCursor(0, 20);
-    display.print("Setup AP: TransportTrackerSetup");
-    display.display(true);
-    // Loop indefinitely while waiting for user to configure
-    while (true)
-    {
-      delay(1000);
-    }
+    resetCredentials(); 
+    // resetCredentials calls ESP.restart(), so code after this is unreachable.
   }
 
   // --- Normal WiFi + Tracker Logic ---
   if (WiFi.status() == WL_CONNECTED)
   {
-    WiFiClientSecure client;
-    client.setInsecure(); // accept any SSL cert
-    HTTPClient http;
+    // Fetch data using the modular function
+    TrainData data = fetchTrainData(origin_code, destination_code, api_url_base);
 
-    // Build API URL dynamically
-    String currentUrl = api_url_base + origin_code + "&name_destination=" + destination_code;
-    Serial.println("API Request: " + currentUrl);
-
-    bool requestDone = false;
-
-    while (!requestDone)
+    if (data.success)
     {
-      http.begin(client, currentUrl.c_str());
-      int httpCode = http.GET();
-
-      if (httpCode == HTTP_CODE_OK)
-      {
-        String payload = http.getString();
-        StaticJsonDocument<8192> doc;
-        DeserializationError error = deserializeJson(doc, payload);
-
-        if (!error)
-        {
-          JsonObject nextTrain;
-          // time(nullptr) returns the current UTC epoch time
-          time_t nowTime = time(nullptr); 
-
-          for (JsonObject train : doc.as<JsonArray>())
-          {
-            String depTimeStr = train["legs"][0]["origin"]["departureTimePlanned"].as<String>();
-            
-            // CORRECT: Convert the UTC time string to the correct UTC epoch time for comparison
-            time_t depTime = utcIsoToEpoch(depTimeStr);
-
-            if (depTime >= nowTime)
-            {
-              nextTrain = train;
-              break;
-            }
-          }
-
-          if (nextTrain.isNull())
-            nextTrain = doc[0].as<JsonObject>();
-
-          JsonObject origin = nextTrain["legs"][0]["origin"];
-          JsonObject destination = nextTrain["legs"][0]["destination"];
-
-          String originName = origin["name"].as<String>();
-          String originTimeRaw = origin["departureTimePlanned"].as<String>();
-          String destName = destination["name"].as<String>();
-          String destTimeRaw = destination["arrivalTimePlanned"].as<String>();
-
-          String routeType = nextTrain["legs"][0]["transportation"]["disassembledName"].as<String>();
-          String routeLabel = getRouteLabel(routeType);
-
-          auto extractPlatform = [](const String &name) -> String
-          {
-            int idx = name.indexOf("Platform ");
-            if (idx >= 0)
-            {
-              int end = name.indexOf(",", idx);
-              if (end < 0)
-                end = name.length();
-              return name.substring(idx, end);
-            }
-            return "";
-          };
-
-          auto extractStation = [](const String &name) -> String
-          {
-            int idx = name.indexOf(",");
-            if (idx >= 0)
-              return name.substring(0, idx);
-            return name;
-          };
-
-          // Use the new, fixed `formatTime` function
-          String originStation = extractStation(originName);
-          String originPlatform = extractPlatform(originName);
-          String originTime = formatTime(originTimeRaw);
-
-          String destStation = extractStation(destName);
-          String destPlatform = extractPlatform(destName);
-          String destTime = formatTime(destTimeRaw);
-
-          // Display logic
-          display.fillScreen(GxEPD_WHITE);
-          display.fillRect(0, 0, display.width(), 15, GxEPD_BLACK);
-          display.setTextColor(GxEPD_WHITE);
-          display.setCursor(10, 5);
-          display.print(originStation);
-          display.setCursor(display.width() / 2 + 10, 5);
-          display.print(destStation);
-
-          display.drawLine(display.width() / 2, 0, display.width() / 2, display.height(), GxEPD_BLACK);
-
-          display.setTextColor(GxEPD_BLACK);
-          display.setCursor(10, 30);
-          display.print(originPlatform);
-          display.setCursor(10, 50);
-          display.print("Dep: ");
-          display.print(originTime);
-
-          display.setCursor(display.width() / 2 + 10, 30);
-          display.print(destPlatform);
-          display.setCursor(display.width() / 2 + 10, 50);
-          display.print("Arr: ");
-          display.print(destTime);
-
-          display.setCursor(10, display.height() - 20);
-          display.print(routeLabel);
-          
-          // Show current time in the corner
-          display.setCursor(display.width() - 50, display.height() - 10);
-          display.print(getCurrentTimeString()); 
-
-          display.display(true);
-          delay(30000);
-        }
-        else
-        {
-          displayError("JSON Error: " + String(error.c_str()));
-          delay(30000);
-        }
-        requestDone = true;
-      }
-      else
-      {
-        displayError("HTTP Error " + String(httpCode));
-        delay(30000);
-        requestDone = true;
-      }
-      http.end();
+      // Display the successful result
+      displayTrainData(
+        data.originStation, 
+        data.originPlatform, 
+        data.originTime,
+        data.destStation, 
+        data.destPlatform, 
+        data.destTime,
+        data.routeLabel
+      );
     }
+    else
+    {
+      // Display the error message
+      displayError("Fetch Failed: " + data.errorMessage);
+    }
+
+    // Wait 30 seconds after a successful or failed fetch attempt
+    delay(30000); 
   }
   else
   {
     displayError("WiFi Lost! Reconnecting...");
     WiFi.reconnect();
+    delay(5000); // Wait a bit before checking status again
   }
 
+  // --- Full refresh interval check ---
   if (millis() - lastRefresh > refreshInterval)
   {
+    Serial.println("Performing full refresh.");
     fullRefresh();
     lastRefresh = millis();
   }
